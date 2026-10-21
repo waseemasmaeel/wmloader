@@ -1,1 +1,129 @@
 
+name: Build wmloader (NTS/ZTS × glibc/musl × x86_64/arm64)
+
+# يبني wmloader.so لعدة بيئات عملاء مختلفة:
+#   - إصدار PHP: من حقل php_versions عند التشغيل اليدوي، أو القائمة الافتراضية أدناه
+#   - Thread Safety: NTS (php-fpm/LiteSpeed، الأشيع) و ZTS (Apache mod_php)
+#   - مكتبة C: glibc (Ubuntu/Debian/AlmaLinux/CloudLinux/cPanel) و musl (Alpine)
+#   - المعمارية: x86_64 و arm64 (VPS/سيرفرات ARM الحديثة مثل Ampere/Graviton)
+#
+# الفكرة: بدل الاعتماد على حزم جاهزة من توزيعة معيّنة (تسمية حزم ZTS تختلف بين
+# Remi/Ubuntu PPA/Alpine وتعقّد المطابقة)، كل job يبني PHP نفسه من الكود المصدري
+# (php-src) بالإصدار ووضع TS المطلوبين، فيحصل على phpize/php-config مطابقين تمامًا
+# لما سيعمل عليه wmloader.so عند العميل، بغض النظر عن توزيعته.
+#
+# ملاحظات مهمة:
+#  1) البناء لـ glibc يتم داخل almalinux:8 (glibc 2.28) عمدًا: التوافق في glibc
+#     اتجاه واحد فقط (أحدث يشغّل الأقدم وليس العكس)، فهذا يضمن عمل الملف على خوادم
+#     حديثة وقديمة معًا. استبدلها بـ almalinux:9 فقط لو عملاؤك على توزيعات حديثة جدًا.
+#  2) رانر arm64 المجاني (ubuntu-22.04-arm) متاح فقط لريبو عام (public). لو الريبو
+#     خاص (private) — وهذا هو الغالب لأداة تشفير خاصة بك — ستحتاج GitHub Larger
+#     Runners المدفوعة لـ arm64، أو self-hosted runner على جهاز/VPS ARM فعلي.
+#  3) المصفوفة الكاملة = عدد إصدارات PHP × 2(libc) × 2(ts) × 2(arch)، فهي كثيرة
+#     Jobs دفعة واحدة؛ استخدم حقل php_versions عند التشغيل اليدوي لتضييقها وقت الحاجة.
+#
+# المصدر (config.m4, php_wmloader.h, wmcrypto.h, wmloader.c) يجب أن يكون موجودًا في هذا
+# الريبو تحت المسار المحدد في SOURCE_DIR أدناه.
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      php_versions:
+        description: "إصدارات PHP (مفصولة بفواصل)"
+        default: "7.4,8.0,8.1,8.2,8.3,8.4"
+        required: false
+
+env:
+  SOURCE_DIR: source-dir   # عدّل هذا إن كانت ملفات wmloader في مسار آخر من الريبو
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      php_json: ${{ steps.set.outputs.php_json }}
+    steps:
+      - id: set
+        run: |
+          IN="${{ github.event.inputs.php_versions || '7.4,8.0,8.1,8.2,8.3,8.4' }}"
+          JSON=$(echo "$IN" | tr ',' '\n' | awk 'NF {$1=$1; print}' | jq -R . | jq -sc .)
+          echo "php_json=$JSON" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: matrix
+    runs-on: ${{ matrix.arch == 'arm64' && 'ubuntu-22.04-arm' || 'ubuntu-latest' }}
+    container:
+      image: ${{ matrix.libc == 'glibc' && 'almalinux:8' || 'alpine:3.19' }}
+    strategy:
+      fail-fast: false
+      matrix:
+        libc: [glibc, musl]
+        php: ${{ fromJson(needs.matrix.outputs.php_json) }}
+        ts: [nts, zts]
+        arch: [x86_64, arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: تثبيت أدوات البناء (AlmaLinux/glibc)
+        if: matrix.libc == 'glibc'
+        run: |
+          dnf install -y gcc gcc-c++ make autoconf automake libtool bison re2c \
+            git pkgconfig openssl-devel libxml2-devel sqlite-devel zlib-devel \
+            file diffutils
+
+      - name: تثبيت أدوات البناء (Alpine/musl)
+        if: matrix.libc == 'musl'
+        run: |
+          apk add --no-cache bash build-base linux-headers autoconf automake \
+            libtool bison re2c git pkgconfig openssl-dev libxml2-dev sqlite-dev \
+            zlib-dev file diffutils
+
+      - name: تنزيل كود PHP-${{ matrix.php }} المصدري
+        run: git clone --depth 1 --branch "PHP-${{ matrix.php }}" https://github.com/php/php-src.git /tmp/php-src
+
+      - name: بناء وتثبيت PHP ${{ matrix.php }} (${{ matrix.ts }}) محليًا — فقط للحصول على phpize/php-config المطابقين
+        working-directory: /tmp/php-src
+        run: |
+          ./buildconf --force
+          EXTRA_TS=""
+          if [ "${{ matrix.ts }}" = "zts" ]; then EXTRA_TS="--enable-maintainer-zts"; fi
+          ./configure --prefix=/opt/php --disable-all --disable-cgi --without-pear $EXTRA_TS
+          make -j"$(nproc)"
+          make install
+          /opt/php/bin/php-config
+
+      - name: بناء wmloader.so مقابل PHP ${{ matrix.php }} (${{ matrix.ts }}, ${{ matrix.libc }}, ${{ matrix.arch }})
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          /opt/php/bin/phpize
+          ./configure --enable-wmloader --with-php-config=/opt/php/bin/php-config
+          make -j"$(nproc)"
+          file modules/wmloader.so
+
+      - name: تجميع الناتج باسم واضح
+        run: |
+          mkdir -p dist
+          cp "${{ env.SOURCE_DIR }}/modules/wmloader.so" \
+             "dist/wmloader-php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.libc }}-${{ matrix.arch }}.so"
+
+      - name: رفع الناتج كـ artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wmloader-php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.libc }}-${{ matrix.arch }}
+          path: dist/*.so
+          if-no-files-found: error
+
+  release:
+    # يجمع كل نسخ .so في GitHub Release واحد عند دفع تاغ (مثل v2.0.1)
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/**/*.so
