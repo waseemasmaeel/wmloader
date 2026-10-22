@@ -114,11 +114,17 @@ jobs:
         run: |
           ./buildconf --force
           EXTRA_TS=""
-          if [ "${{ matrix.ts }}" = "zts" ]; then EXTRA_TS="--enable-maintainer-zts"; fi
+          if [ "${{ matrix.ts }}" = "zts" ]; then EXTRA_TS="--enable-zts"; fi
           ./configure --prefix=/opt/php --disable-all --disable-cgi --without-pear $EXTRA_TS
           make -j"$(nproc)"
           make install
           /opt/php/bin/php-config --version
+          ACTUAL_ZTS=$(/opt/php/bin/php -r 'echo (int) PHP_ZTS;')
+          EXPECTED_ZTS=0; [ "${{ matrix.ts }}" = "zts" ] && EXPECTED_ZTS=1
+          if [ "$ACTUAL_ZTS" != "$EXPECTED_ZTS" ]; then
+            echo "::error::توقعنا matrix.ts=${{ matrix.ts }} (ZTS=$EXPECTED_ZTS) لكن PHP المبني فعليًا ZTS=$ACTUAL_ZTS — غالبًا خيار configure غير مدعوم/تم تجاهله بصمت"
+            exit 1
+          fi
 
       - name: بناء wmloader.so مقابل PHP ${{ matrix.php }} (${{ matrix.ts }}, ${{ matrix.libc }}, ${{ matrix.arch }})
         working-directory: ${{ env.SOURCE_DIR }}
