@@ -139,8 +139,8 @@ jobs:
           cp "${{ env.SOURCE_DIR }}/modules/wmloader.so" "dist/$VARIANT/wmloader.so"
           {
             echo "WMLOADER_PHP_VERSION=$(/opt/php/bin/php -r 'echo PHP_VERSION;')"
-            echo "WMLOADER_ZEND_MODULE_API=$(/opt/php/bin/php -i | awk -F'=> ' '/^PHP Extension/{print $2}')"
-            echo "WMLOADER_ZEND_EXTENSION_API=$(/opt/php/bin/php -i | awk -F'=> ' '/^Zend Extension/{print $2}')"
+            echo "WMLOADER_ZEND_MODULE_API=$(/opt/php/bin/php -i | awk -F'=> ' '/^PHP Extension =>/{print $2; exit}')"
+            echo "WMLOADER_ZEND_EXTENSION_API=$(/opt/php/bin/php -i | awk -F'=> ' '/^Zend Extension =>/{print $2; exit}')"
             echo "WMLOADER_ARCH=$(uname -m)"
             echo "WMLOADER_LIBC=${{ matrix.libc }}"
             echo "WMLOADER_ZTS=$(/opt/php/bin/php -r 'echo (int)(defined("PHP_ZTS") ? PHP_ZTS : 0);')"
