@@ -43,6 +43,10 @@ on:
 
 env:
   SOURCE_DIR: source-dir   # عدّل هذا إن كانت ملفات wmloader في مسار آخر من الريبو
+  # نسخة OpenSSL LTS المضمَّنة ساكنًا في كل نسخ wmloader.so — لتحديثها أمنيًا مستقبلًا
+  # (CVE جديد مثلًا) غيّر هذا السطر فقط، ثم راجع الرقم الأحدث من:
+  # https://openssl-library.org/source/  (التزم بسلسلة 3.5.x LTS، مدعومة حتى أبريل 2030)
+  OPENSSL_VERSION: "3.5.7"
 
 jobs:
   matrix:
@@ -85,8 +89,8 @@ jobs:
           dnf install -y dnf-plugins-core
           dnf config-manager --set-enabled powertools
           dnf install -y gcc gcc-c++ make autoconf automake libtool bison \
-            git pkgconfig openssl-devel libxml2-devel sqlite-devel zlib-devel \
-            file diffutils curl xz python39
+            git pkgconfig libxml2-devel sqlite-devel zlib-devel \
+            file diffutils curl xz python39 binutils gnupg2 perl
 
       - name: تثبيت re2c حديث (AlmaLinux 8 — PowerTools تحتوي 0.14.3 فقط، وPHP 8.3+ يتطلب 1.0.3+)
         if: matrix.libc == 'glibc'
@@ -103,8 +107,8 @@ jobs:
         if: matrix.libc == 'musl'
         run: |
           apk add --no-cache bash build-base linux-headers autoconf automake \
-            libtool bison re2c git pkgconfig openssl-dev libxml2-dev sqlite-dev \
-            zlib-dev file diffutils
+            libtool bison re2c git pkgconfig libxml2-dev sqlite-dev \
+            zlib-dev file diffutils binutils gnupg perl
 
       - name: تنزيل كود PHP-${{ matrix.php }} المصدري
         run: git clone --depth 1 --branch "PHP-${{ matrix.php }}" https://github.com/php/php-src.git /tmp/php-src
@@ -126,13 +130,69 @@ jobs:
             exit 1
           fi
 
+      - name: بناء OpenSSL ${{ env.OPENSSL_VERSION }} من المصدر (نسخة موحّدة ومُتحقَّقة لكل البيئات)
+        # لا نعتمد على openssl-devel/openssl-dev الخاصة بصورة البناء (AlmaLinux 8 = 1.1.1
+        # منتهية الدعم أمنيًا، Alpine 3.19 = نسخة مختلفة) — بل نبني نسخة LTS واحدة محددة
+        # ومُتحقَّق من بصمتها وتوقيعها الرقمي، فتكون مطابقة 100% عبر كل توليفات المصفوفة،
+        # ويصبح تحديثها أمنيًا لاحقًا مجرد تغيير OPENSSL_VERSION بالأعلى (بند env).
+        run: |
+          mkdir -p /tmp/openssl-src && cd /tmp/openssl-src
+          BASE="https://github.com/openssl/openssl/releases/download/openssl-${OPENSSL_VERSION}"
+          curl -fLO "${BASE}/openssl-${OPENSSL_VERSION}.tar.gz"
+          curl -fLO "${BASE}/openssl-${OPENSSL_VERSION}.tar.gz.sha256"
+          curl -fLO "${BASE}/openssl-${OPENSSL_VERSION}.tar.gz.asc"
+          sha256sum -c "openssl-${OPENSSL_VERSION}.tar.gz.sha256"
+
+          curl -fsSL https://openssl-library.org/source/pubkeys.asc -o openssl-pubkeys.asc
+          (command -v gpg >/dev/null || (command -v apk >/dev/null && apk add --no-cache gnupg) || (command -v dnf >/dev/null && dnf install -y gnupg2))
+          gpg --import openssl-pubkeys.asc
+          # بصمة مفتاح التوقيع الرسمي لـ OpenSSL — راجعها دوريًا مقابل
+          # https://openssl-library.org/policies/general/artifact-signing-policy/
+          echo "B146647E45A7B33947AB226B2A2C87D161692D40:6:" | gpg --import-ownertrust
+          gpg --verify "openssl-${OPENSSL_VERSION}.tar.gz.asc" "openssl-${OPENSSL_VERSION}.tar.gz"
+
+          tar -xf "openssl-${OPENSSL_VERSION}.tar.gz"
+          cd "openssl-${OPENSSL_VERSION}"
+          ./Configure no-shared no-tests no-docs --prefix=/opt/openssl-static --libdir=lib
+          make -j"$(nproc)"
+          make install_sw
+          test -f /opt/openssl-static/lib/libcrypto.a || { echo "::error::فشل بناء libcrypto.a الساكنة"; exit 1; }
+
       - name: بناء wmloader.so مقابل PHP ${{ matrix.php }} (${{ matrix.ts }}, ${{ matrix.libc }}, ${{ matrix.arch }})
         working-directory: ${{ env.SOURCE_DIR }}
+        env:
+          CPPFLAGS: -I/opt/openssl-static/include
+          LDFLAGS: -L/opt/openssl-static/lib
         run: |
           /opt/php/bin/phpize
           ./configure --enable-wmloader --with-php-config=/opt/php/bin/php-config
           make -j"$(nproc)"
           file modules/wmloader.so
+
+      - name: ضمان الربط الساكن فعليًا (شبكة أمان)
+        # لو تجاهل configure السابق مسارات CPPFLAGS/LDFLAGS ورجع للديناميكي النظامي
+        # (يعتمد على كيفية كتابة config.m4)، هذه الخطوة تجبر الربط بنسختنا الساكنة
+        # المبنية للتو بدل أي libcrypto/libssl أخرى موجودة على صورة البناء.
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          if grep -qE '(^|[^-])-lcrypto' Makefile; then
+            sed -i "s|-lcrypto|/opt/openssl-static/lib/libcrypto.a|g" Makefile
+            sed -i "s|-lssl|/opt/openssl-static/lib/libssl.a|g" Makefile
+            make clean && make -j"$(nproc)"
+          fi
+          file modules/wmloader.so
+
+      - name: التحقق من صفر اعتماد ديناميكي على OpenSSL
+        # شبكة أمان: لو فشل الربط الساكن أعلاه أو تغيّر config.m4 مستقبلًا بما يعيد
+        # إدخال -lcrypto ديناميكيًا، هذه الخطوة توقف الـ job فورًا بدل شحن .so معطوب بصمت
+        working-directory: ${{ env.SOURCE_DIR }}
+        run: |
+          DEPS=$(readelf -d modules/wmloader.so | grep NEEDED || true)
+          echo "$DEPS"
+          if echo "$DEPS" | grep -qiE 'libssl|libcrypto'; then
+            echo "::error::wmloader.so لا يزال مرتبطًا ديناميكيًا بـ OpenSSL رغم خطوة الربط الساكن"
+            exit 1
+          fi
 
       - name: توليد بيان التوافق (manifest.env) من نفس PHP المبنيّ للتو
         # يُقرأ من /opt/php/bin/php مباشرة (الثنائي الفعلي الذي بُني له wmloader.so)
