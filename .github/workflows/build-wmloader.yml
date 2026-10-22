@@ -90,7 +90,7 @@ jobs:
           dnf config-manager --set-enabled powertools
           dnf install -y gcc gcc-c++ make autoconf automake libtool bison \
             git pkgconfig libxml2-devel sqlite-devel zlib-devel \
-            file diffutils curl xz python39 binutils gnupg2 perl
+            file diffutils curl tar ca-certificates xz python39 binutils gnupg2 perl
 
       - name: تثبيت re2c حديث (AlmaLinux 8 — PowerTools تحتوي 0.14.3 فقط، وPHP 8.3+ يتطلب 1.0.3+)
         if: matrix.libc == 'glibc'
@@ -108,7 +108,7 @@ jobs:
         run: |
           apk add --no-cache bash build-base linux-headers autoconf automake \
             libtool bison re2c git pkgconfig libxml2-dev sqlite-dev \
-            zlib-dev file diffutils binutils gnupg perl
+            zlib-dev file diffutils binutils gnupg perl curl tar ca-certificates
 
       - name: تنزيل كود PHP-${{ matrix.php }} المصدري
         run: git clone --depth 1 --branch "PHP-${{ matrix.php }}" https://github.com/php/php-src.git /tmp/php-src
@@ -214,6 +214,20 @@ jobs:
             echo "WMLOADER_SOURCE_COMMIT=${{ github.sha }}"
           } > "dist/$VARIANT/manifest.env"
           cat "dist/$VARIANT/manifest.env"
+
+          # تحقق فوري: كل سطر يجب أن يكون KEY=VALUE بصيغة صحيحة، وكل المفاتيح المطلوبة
+          # موجودة وليست فارغة. هذا يمنع تكرار سيناريو "البناء نجح لكن manifest.env
+          # تالف بصمت واكتُشف لاحقًا فقط عند release".
+          REQUIRED_KEYS="WMLOADER_PHP_VERSION WMLOADER_ZEND_MODULE_API WMLOADER_ZEND_EXTENSION_API WMLOADER_ARCH WMLOADER_LIBC WMLOADER_ZTS WMLOADER_BUILT_AT WMLOADER_SOURCE_COMMIT"
+          BAD_LINE=$(grep -vE '^[A-Z_]+=.+$' "dist/$VARIANT/manifest.env" || true)
+          if [ -n "$BAD_LINE" ]; then
+            echo "::error::manifest.env يحتوي سطرًا غير صالح (ليس بصيغة KEY=VALUE):"
+            echo "$BAD_LINE"
+            exit 1
+          fi
+          for k in $REQUIRED_KEYS; do
+            grep -q "^${k}=" "dist/$VARIANT/manifest.env" || { echo "::error::الحقل $k مفقود من manifest.env"; exit 1; }
+          done
 
       - name: رفع الناتج كـ artifact (so + manifest.env معًا)
         uses: actions/upload-artifact@v4
