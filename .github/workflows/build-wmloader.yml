@@ -1,4 +1,3 @@
-
 name: Build wmloader (NTS/ZTS × glibc/musl × x86_64/arm64)
 
 # يبني wmloader.so لعدة بيئات عملاء مختلفة:
@@ -68,6 +67,8 @@ jobs:
       - name: تثبيت أدوات البناء (AlmaLinux/glibc)
         if: matrix.libc == 'glibc'
         run: |
+          dnf install -y dnf-plugins-core
+          dnf config-manager --set-enabled powertools
           dnf install -y gcc gcc-c++ make autoconf automake libtool bison re2c \
             git pkgconfig openssl-devel libxml2-devel sqlite-devel zlib-devel \
             file diffutils
@@ -91,7 +92,7 @@ jobs:
           ./configure --prefix=/opt/php --disable-all --disable-cgi --without-pear $EXTRA_TS
           make -j"$(nproc)"
           make install
-          /opt/php/bin/php-config
+          /opt/php/bin/php-config --version
 
       - name: بناء wmloader.so مقابل PHP ${{ matrix.php }} (${{ matrix.ts }}, ${{ matrix.libc }}, ${{ matrix.arch }})
         working-directory: ${{ env.SOURCE_DIR }}
