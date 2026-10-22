@@ -31,7 +31,7 @@ on:
     inputs:
       php_versions:
         description: "إصدارات PHP (مفصولة بفواصل)"
-        default: "7.4,8.0,8.1,8.2,8.3,8.4"
+        default: "8.0,8.1,8.2,8.3,8.4"
         required: false
 
 env:
@@ -45,7 +45,7 @@ jobs:
     steps:
       - id: set
         run: |
-          IN="${{ github.event.inputs.php_versions || '7.4,8.0,8.1,8.2,8.3,8.4' }}"
+          IN="${{ github.event.inputs.php_versions || '8.0,8.1,8.2,8.3,8.4' }}"
           JSON=$(echo "$IN" | tr ',' '\n' | awk 'NF {$1=$1; print}' | jq -R . | jq -sc .)
           echo "php_json=$JSON" >> "$GITHUB_OUTPUT"
 
@@ -61,6 +61,14 @@ jobs:
         php: ${{ fromJson(needs.matrix.outputs.php_json) }}
         ts: [nts, zts]
         arch: [x86_64, arm64]
+        exclude:
+          # دمج Alpine (musl) + arm64 غير مدعوم حاليًا على GitHub-hosted runners: الأكشنز
+          # المبنية بـ JavaScript (checkout, upload-artifact...) تحتاج Node.js من رانر
+          # الاستضافة نفسه، ولا يوجد بناء Node رسمي لـ musl+arm64 بعد (قيد GitHub نفسها،
+          # وليس خطأ في هذا الملف). لو احتجته فعليًا لاحقًا سيلزم self-hosted runner ARM
+          # عليه Node مثبّت مسبقًا داخل الحاوية.
+          - libc: musl
+            arch: arm64
     steps:
       - uses: actions/checkout@v4
 
@@ -69,9 +77,20 @@ jobs:
         run: |
           dnf install -y dnf-plugins-core
           dnf config-manager --set-enabled powertools
-          dnf install -y gcc gcc-c++ make autoconf automake libtool bison re2c \
+          dnf install -y gcc gcc-c++ make autoconf automake libtool bison \
             git pkgconfig openssl-devel libxml2-devel sqlite-devel zlib-devel \
-            file diffutils
+            file diffutils curl xz
+
+      - name: تثبيت re2c حديث (AlmaLinux 8 — PowerTools تحتوي 0.14.3 فقط، وPHP 8.3+ يتطلب 1.0.3+)
+        if: matrix.libc == 'glibc'
+        run: |
+          curl -fsSL -o /tmp/re2c.tar.xz https://github.com/skvadrik/re2c/releases/download/3.1/re2c-3.1.tar.xz
+          tar -xf /tmp/re2c.tar.xz -C /tmp
+          cd /tmp/re2c-3.1
+          ./configure
+          make -j"$(nproc)"
+          make install
+          re2c --version
 
       - name: تثبيت أدوات البناء (Alpine/musl)
         if: matrix.libc == 'musl'
