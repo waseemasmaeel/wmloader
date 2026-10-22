@@ -31,7 +31,7 @@ on:
     inputs:
       php_versions:
         description: "إصدارات PHP (مفصولة بفواصل)"
-        default: "8.0,8.1,8.2,8.3,8.4"
+        default: "8.1,8.2,8.3,8.4"
         required: false
 
 env:
@@ -45,7 +45,7 @@ jobs:
     steps:
       - id: set
         run: |
-          IN="${{ github.event.inputs.php_versions || '8.0,8.1,8.2,8.3,8.4' }}"
+          IN="${{ github.event.inputs.php_versions || '8.1,8.2,8.3,8.4' }}"
           JSON=$(echo "$IN" | tr ',' '\n' | awk 'NF {$1=$1; print}' | jq -R . | jq -sc .)
           echo "php_json=$JSON" >> "$GITHUB_OUTPUT"
 
@@ -79,7 +79,7 @@ jobs:
           dnf config-manager --set-enabled powertools
           dnf install -y gcc gcc-c++ make autoconf automake libtool bison \
             git pkgconfig openssl-devel libxml2-devel sqlite-devel zlib-devel \
-            file diffutils curl xz
+            file diffutils curl xz python3
 
       - name: تثبيت re2c حديث (AlmaLinux 8 — PowerTools تحتوي 0.14.3 فقط، وPHP 8.3+ يتطلب 1.0.3+)
         if: matrix.libc == 'glibc'
