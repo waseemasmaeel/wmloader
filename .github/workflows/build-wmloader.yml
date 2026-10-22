@@ -18,6 +18,13 @@ name: Build wmloader (NTS/ZTS × glibc/musl × x86_64/arm64)
 #  2) رانر arm64 المجاني (ubuntu-22.04-arm) متاح فقط لريبو عام (public). لو الريبو
 #     خاص (private) — وهذا هو الغالب لأداة تشفير خاصة بك — ستحتاج GitHub Larger
 #     Runners المدفوعة لـ arm64، أو self-hosted runner على جهاز/VPS ARM فعلي.
+#     توليفة musl+arm64 مستبعدة أدناه لسببين متراكبين: قيد Node.js التقني من GitHub
+#     (انظر ملاحظة exclude)، وقرار تجاري مؤقت بتأجيل خدمة هذه الشريحة إلى ما بعد
+#     تحقيق المشروع أول إيرادات - لا عملاء فعليين عليها حاليًا يبرّرون الاستثمار في
+#     رانر ذاتي أو خادم ARM مخصَّص. عند إعادة النظر لاحقًا: إن ظهر عميل عاجل عليها
+#     قبل ذلك، بديل مجاني فوري دون خادم أو بطاقة دفع هو محاكاة QEMU
+#     (tonistiigi/binfmt) داخل ubuntu-latest نفسه - أبطأ كثيرًا لكنه كافٍ لبناء
+#     لمرة واحدة.
 #  3) المصفوفة الكاملة = عدد إصدارات PHP × 2(libc) × 2(ts) × 2(arch)، فهي كثيرة
 #     Jobs دفعة واحدة؛ استخدم حقل php_versions عند التشغيل اليدوي لتضييقها وقت الحاجة.
 #
@@ -121,17 +128,32 @@ jobs:
           make -j"$(nproc)"
           file modules/wmloader.so
 
-      - name: تجميع الناتج باسم واضح
+      - name: توليد بيان التوافق (manifest.env) من نفس PHP المبنيّ للتو
+        # يُقرأ من /opt/php/bin/php مباشرة (الثنائي الفعلي الذي بُني له wmloader.so)
+        # لا من صورة خارجية - صفر تخمين. uname -m هو الحقيقي من النظام، وليس
+        # ${{ matrix.arch }} (الذي يكتب arm64 بينما uname -m الفعلي يُرجع aarch64 -
+        # استعمال تسمية المصفوفة هنا كان سيُسقط مطابقة كل توليفات ARM بصمت لاحقًا).
         run: |
-          mkdir -p dist
-          cp "${{ env.SOURCE_DIR }}/modules/wmloader.so" \
-             "dist/wmloader-php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.libc }}-${{ matrix.arch }}.so"
+          VARIANT="php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.libc }}-${{ matrix.arch }}"
+          mkdir -p "dist/$VARIANT"
+          cp "${{ env.SOURCE_DIR }}/modules/wmloader.so" "dist/$VARIANT/wmloader.so"
+          {
+            echo "WMLOADER_PHP_VERSION=$(/opt/php/bin/php -r 'echo PHP_VERSION;')"
+            echo "WMLOADER_ZEND_MODULE_API=$(/opt/php/bin/php -i | awk -F'=> ' '/^PHP Extension/{print $2}')"
+            echo "WMLOADER_ZEND_EXTENSION_API=$(/opt/php/bin/php -i | awk -F'=> ' '/^Zend Extension/{print $2}')"
+            echo "WMLOADER_ARCH=$(uname -m)"
+            echo "WMLOADER_LIBC=${{ matrix.libc }}"
+            echo "WMLOADER_ZTS=$(/opt/php/bin/php -r 'echo (int)(defined("PHP_ZTS") ? PHP_ZTS : 0);')"
+            echo "WMLOADER_BUILT_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "WMLOADER_SOURCE_COMMIT=${{ github.sha }}"
+          } > "dist/$VARIANT/manifest.env"
+          cat "dist/$VARIANT/manifest.env"
 
-      - name: رفع الناتج كـ artifact
+      - name: رفع الناتج كـ artifact (so + manifest.env معًا)
         uses: actions/upload-artifact@v4
         with:
           name: wmloader-php${{ matrix.php }}-${{ matrix.ts }}-${{ matrix.libc }}-${{ matrix.arch }}
-          path: dist/*.so
+          path: dist/*/
           if-no-files-found: error
 
   release:
@@ -144,6 +166,23 @@ jobs:
         with:
           path: dist
 
+      - name: ضغط كل توليفة (so + manifest.env) في أرشيف واحد
+        # لا أفترض عمق تداخل مجلدات artifacts بعد التنزيل (يختلف حسب سلوك
+        # upload/download-artifact)؛ أبحث عن wmloader.so أينما كان تحت dist/،
+        # واسم الأرشيف مُشتقّ من حقول manifest.env نفسها (حقيقة، لا تخمين مسار).
+        run: |
+          mkdir -p release
+          find dist -type f -name wmloader.so -print0 | while IFS= read -r -d '' so; do
+            d="$(dirname "$so")"
+            [ -f "$d/manifest.env" ] || { echo "manifest.env ناقص في $d" >&2; exit 1; }
+            ( set -a; . "$d/manifest.env"; set +a
+              ts="nts"; [ "$WMLOADER_ZTS" = 1 ] && ts="zts"
+              variant="php${WMLOADER_PHP_VERSION%.*}-${ts}-${WMLOADER_LIBC}-${WMLOADER_ARCH}"
+              (cd "$d" && zip -q -j "$OLDPWD/release/wmloader-${variant}.zip" wmloader.so manifest.env)
+            )
+          done
+          ls -la release
+
       - uses: softprops/action-gh-release@v2
         with:
-          files: dist/**/*.so
+          files: release/*.zip
